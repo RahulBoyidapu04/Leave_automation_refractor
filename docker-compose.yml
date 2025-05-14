@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: leave-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    env_file:
+      - .env
+    depends_on:
+      - db
+
+  frontend:
+    build: ./frontend
+    container_name: leave-frontend
+    ports:
+      - "3000:3000"
+    stdin_open: true
+    tty: true
+    depends_on:
+      - backend
+
+  db:
+    image: sqlite
+    container_name: leave-sqlite
+    volumes:
+      - ./backend/app.db:/data/app.db
+    command: tail -f /dev/null  # keeps container running (SQLite is file-based)
