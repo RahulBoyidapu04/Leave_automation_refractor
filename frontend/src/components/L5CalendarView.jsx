@@ -1,4 +1,4 @@
-// L5CalendarView.jsx - full code previously providedimport React, { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, LabelList } from 'recharts';
 
@@ -14,10 +14,11 @@ const L5CalendarView = ({ user }) => {
 
   const fetchData = async () => {
     try {
-      const res = await axios.get('/admin/availability/next-30-days', {
+      // Updated endpoint to match backend
+      const res = await axios.get('/api/v1/leave/forecast/30days', {
         headers: { Authorization: `Bearer ${user.token}` }
       });
-      setData(res.data);
+      setData(res.data.data?.forecast || []);
     } catch (err) {
       console.error('Failed to fetch shrinkage data', err);
     }
@@ -25,6 +26,7 @@ const L5CalendarView = ({ user }) => {
 
   useEffect(() => {
     fetchData();
+    // eslint-disable-next-line
   }, []);
 
   const processChartData = () => {
@@ -32,7 +34,7 @@ const L5CalendarView = ({ user }) => {
 
     data.forEach((entry) => {
       const week = `Week ${Math.floor((new Date(entry.date).getDate() - 1) / 7) + 1}`;
-      Object.entries(entry.shrinkage_by_team).forEach(([team, shrinkage]) => {
+      Object.entries(entry.shrinkage_by_team || {}).forEach(([team, shrinkage]) => {
         const key = view === 'weekly' ? week : 'Full Month';
         if (!grouped[key]) grouped[key] = {};
         if (!grouped[key][team]) grouped[key][team] = [];

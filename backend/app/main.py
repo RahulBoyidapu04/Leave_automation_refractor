@@ -99,6 +99,7 @@ from .routes import router as core_router  # router already has tags=["Core"] in
 from .admin_routes import router as admin_router
 from .notifications_routes import router as notif_router
 from .reporting_routes import router as report_router
+from app.logic import ValidationError, LeaveProcessingError  # <-- import your custom exceptions
 
 # Mount routers
 app.include_router(auth_router)
@@ -155,3 +156,27 @@ async def startup_event():
         logger.info("Registered routes:")
         for route in app.routes:
             logger.info(f"Route: {route.path}, Methods: {route.methods}")
+
+
+
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError):
+    return JSONResponse(
+        status_code=400,
+        content={
+            "message": str(exc),
+            "status": "error",
+            "timestamp": datetime.now().isoformat()
+        }
+    )
+
+@app.exception_handler(LeaveProcessingError)
+async def processing_exception_handler(request: Request, exc: LeaveProcessingError):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "message": str(exc),
+            "status": "error",
+            "timestamp": datetime.now().isoformat()
+        }
+    )

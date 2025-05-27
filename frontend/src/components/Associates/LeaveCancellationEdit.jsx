@@ -30,12 +30,17 @@ const LeaveCancellationAndEdit = ({ user, selectedLeave, onClose, onUpdate }) =>
   const handleUpdate = async () => {
     setLoading(true);
     try {
-      await axios.put(`/leave/${selectedLeave.id}`, form, {
-        headers: { Authorization: `Bearer ${user.token}` }
-      });
+      // Use correct backend endpoint for update (PUT/PATCH not implemented in your backend, so use POST or PATCH if available)
+      await axios.patch(
+        `/api/v1/leave/validate-modification/${selectedLeave.id}`,
+        form,
+        {
+          headers: { Authorization: `Bearer ${user.token}` }
+        }
+      );
       toast.success('Leave updated');
-      onUpdate();   // triggers parent fetch
-      onClose();    // closes modal
+      onUpdate();
+      onClose();
     } catch (err) {
       toast.error('Failed to update leave');
     } finally {
@@ -46,7 +51,7 @@ const LeaveCancellationAndEdit = ({ user, selectedLeave, onClose, onUpdate }) =>
   const handleCancel = async () => {
     setLoading(true);
     try {
-      await axios.delete(`/leave/${selectedLeave.id}`, {
+      await axios.delete(`/api/v1/leave/cancel/${selectedLeave.id}`, {
         headers: { Authorization: `Bearer ${user.token}` }
       });
       toast.success('Leave cancelled');

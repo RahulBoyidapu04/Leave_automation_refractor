@@ -1,442 +1,799 @@
-from fastapi import APIRouter, Depends, Query, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
-from collections import defaultdict
-import calendar
-from pydantic import BaseModel
-from typing import Optional, List
-
-from .database import get_db
-from .models import User, LeaveRequest, LeaveLog, Notification
-from .auth import get_current_user, get_manager_user
-from .logic import (
-    process_leave_application, convert_cl_to_al,
-    get_next_30_day_shrinkage, get_team_shrinkage,
-    calculate_weekly_shrinkage_with_carry_forward
-)
-from .email_utils import send_leave_email
+from datetime import datetime, date, timedelta
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field, validator
 import logging
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from app.database import get_db
+from app.auth import get_current_user
+from app.models import Notification, User
+from typing import List
 
-class LeaveDecisionRequest(BaseModel):
-    leave_id: int
-    decision: str
-    comments: str = ""
 
-# Configure logging
+# Import the updated logic functions
+from app.logic import (
+    # Core leave processing
+    process_leave_application,
+    get_manager_next_30_day_shrinkage,
+    get_user_monthly_leave_summary,
+    get_next_30_day_shrinkage,
+    soft_delete_leave,
+    
+    # Shrinkage calculations
+    get_dashboard_shrinkage,
+    get_monthly_shrinkage,
+    get_next_30_day_shrinkage,
+    calculate_weekly_shrinkage_with_carry_forward,
+    get_manager_dashboard_shrinkage,
+    get_team_availability_summary,
+    get_team_shrinkage,
+    # Enhanced functions
+    get_user_leave_history,
+    get_team_leave_calendar,
+    get_leave_analytics,
+    validate_leave_request_modification,
+    get_pending_approvals,
+    approve_reject_leave,
+    get_leave_balance_summary,
+    
+    # Exception classes
+    ValidationError,
+    LeaveProcessingError,
+    
+    # Utility functions
+    parse_safe_date,
+    get_team_shrinkage
+)
+
+# Database and auth imports
+from app.database import get_db
+from app.auth import get_current_user
+from app.models import User, LeaveRequest
+
+# Configure router and logger
+router = APIRouter(prefix="/api/v1/leave", tags=["Leave Management"])
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Core"])
+# ==================== PYDANTIC MODELS ====================
 
-# ------------------ Models ------------------
-class LeaveApplication(BaseModel):
-    leave_type: str
-    start_date: str
-    end_date: str
-    backup_person: Optional[str] = None
-
-class LeaveEdit(BaseModel):
-    leave_type: Optional[str] = None
-    start_date: str
-    end_date: str
-    backup_person: Optional[str] = None
-
-class NotificationInput(BaseModel):
-    user_id: int
-    message: str
-
-class LeaveResponse(BaseModel):
-    id: int
-    leave_type: str
-    start_date: str
-    end_date: str
-    status: str
-    backup_person: Optional[str] = None
-
-class ProfileResponse(BaseModel):
-    username: str
-    role: str
-
-# ------------------ Profile ------------------
-@router.get("/me", response_model=ProfileResponse)
-def read_profile(current_user: User = Depends(get_current_user)):
-    """Get current user profile information"""
-    logger.info(f"User {current_user.username} accessed profile")
-    return {"username": current_user.username, "role": current_user.role}
-
-# ------------------ Apply Leave ------------------
-@router.post("/apply-leave", status_code=status.HTTP_201_CREATED)
-def apply_leave(data: LeaveApplication, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Submit a new leave application"""
-    try:
-        data_dict = data.dict()
-        data_dict["user_id"] = current_user.id
-        
-        logger.info(f"User {current_user.username} applying for {data.leave_type} leave")
-        result = process_leave_application(db, data_dict)
-        
-        return result
-    except Exception as e:
-        logger.error(f"Error processing leave application: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
-
-# ------------------ Shrinkage & Calendar ------------------
-@router.get("/team-shrinkage")
-def get_shrinkage(date_str: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Get team shrinkage percentage for a specific date"""
-    try:
-        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        shrink = get_team_shrinkage(db, current_user.team_id, target_date)
-        return {"shrinkage": round(shrink, 2)}
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-    except Exception as e:
-        logger.error(f"Error calculating shrinkage: {str(e)}")
-        raise HTTPException(status_code=500, detail="Could not calculate shrinkage")
-
-@router.get("/availability/next-30-days")
-def get_availability_calendar(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Get availability calendar for the next 30 days"""
-    try:
-        return get_next_30_day_shrinkage(db, current_user.id)
-    except Exception as e:
-        logger.error(f"Error getting availability: {str(e)}")
-        raise HTTPException(status_code=500, detail="Could not retrieve availability data")
-
-# ------------------ Manager: Associate Leave Pattern ------------------
-@router.get("/manager/associates")
-def get_associates_for_manager(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Get all associates under manager's team"""
-    if current_user.role != "manager":
-        logger.warning(f"Unauthorized access attempt by {current_user.username} to manager endpoint")
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
+class LeaveApplicationRequest(BaseModel):
+    """Request model for leave application"""
+    leave_type: str = Field(..., min_length=1, max_length=50, description="Type of leave (AL, CL, SL, Optional, Sick)")
+    start_date: str = Field(..., description="Start date in YYYY-MM-DD format")
+    end_date: str = Field(..., description="End date in YYYY-MM-DD format")
+    backup_person: Optional[str] = Field(None, max_length=100, description="Name of backup person")
+    is_half_day: bool = Field(False, description="Whether this is a half-day leave")
+    reason: Optional[str] = Field(None, max_length=500, description="Reason for leave")
     
-    associates = db.query(User).filter(User.team_id == current_user.team_id, User.role == "associate").all()
-    return [{"id": u.id, "username": u.username} for u in associates]
-
-@router.get("/manager/associate-leave-pattern")
-def get_associate_leave_pattern(
-    user_id: int, 
-    month: str = Query(default="All"), 
-    week: str = Query(default="All"),
-    db: Session = Depends(get_db), 
-    current_user: User = Depends(get_current_user)
-):
-    """Get leave pattern for a specific associate"""
-    # Authorization check
-    if current_user.role != "manager":
-        logger.warning(f"Unauthorized access attempt by {current_user.username} to manager endpoint")
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
-
-    # Validate user exists and belongs to manager's team
-    user = db.query(User).get(user_id)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    
-    if user.team_id != current_user.team_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not in your team")
-
-    # Only include approved leaves
-    leaves = db.query(LeaveRequest).filter_by(user_id=user.id, status="Approved").all()
-
-    # Month filtering
-    month_mapping = {
-        "April": 4, "May": 5, "June": 6, "July": 7, "August": 8, "September": 9,
-        "October": 10, "November": 11, "December": 12, "January": 1, "February": 2, "March": 3
-    }
-
-    if month != "All":
-        month_num = month_mapping.get(month)
-        if not month_num:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid month")
-        leaves = [leave for leave in leaves if leave.start_date.month == month_num]
-
-    # Week filtering
-    if week != "All":
+    @validator('start_date', 'end_date')
+    def validate_date_format(cls, v):
+        if not v:
+            raise ValueError('Date cannot be empty')
         try:
-            week_num = int(week)
-            leaves = [leave for leave in leaves if (week_num - 1) * 7 < leave.start_date.day <= week_num * 7]
+            parsed_date = datetime.strptime(v, '%Y-%m-%d')
+            if parsed_date.date() < datetime.now().date():
+                raise ValueError('Date cannot be in the past')
+            return v
+        except ValueError as e:
+            if "past" in str(e):
+                raise e
+            raise ValueError('Date must be in YYYY-MM-DD format')
+    
+    @validator('leave_type')
+    def validate_leave_type(cls, v):
+        valid_types = ['AL', 'CL', 'SL', 'Optional', 'Sick', 'Emergency', 'Maternity', 'Paternity']
+        if v.upper() not in [t.upper() for t in valid_types]:
+            raise ValueError(f'Leave type must be one of: {", ".join(valid_types)}')
+        return v.upper()
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "leave_type": "AL",
+                "start_date": "2024-12-25",
+                "end_date": "2024-12-26",
+                "backup_person": "John Doe",
+                "is_half_day": False,
+                "reason": "Family vacation"
+            }
+        }
+
+
+class LeaveApprovalRequest(BaseModel):
+    """Request model for leave approval/rejection"""
+    action: str = Field(..., description="Action to take: 'Approved' or 'Rejected'")
+    comments: Optional[str] = Field("", max_length=1000, description="Comments for the approval/rejection")
+    
+    @validator('action')
+    def validate_action(cls, v):
+        if v not in ['Approved', 'Rejected']:
+            raise ValueError('Action must be either "Approved" or "Rejected"')
+        return v
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "action": "Approved",
+                "comments": "Leave approved as per policy"
+            }
+        }
+
+
+class LeaveModificationRequest(BaseModel):
+    """Request model for leave modification"""
+    new_start_date: Optional[str] = Field(None, description="New start date in YYYY-MM-DD format")
+    new_end_date: Optional[str] = Field(None, description="New end date in YYYY-MM-DD format")
+    new_backup_person: Optional[str] = Field(None, max_length=100, description="New backup person")
+    new_reason: Optional[str] = Field(None, max_length=500, description="New reason for leave")
+    
+    @validator('new_start_date', 'new_end_date')
+    def validate_date_format(cls, v):
+        if v is None:
+            return v
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+            return v
         except ValueError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Week must be a number or 'All'")
+            raise ValueError('Date must be in YYYY-MM-DD format')
 
-    # Process leave data
-    leave_dates = []
-    summary = defaultdict(int)
-    weekday_freq = defaultdict(int)
 
-    for leave in leaves:
-        current = leave.start_date
-        while current <= leave.end_date:
-            iso = current.isoformat()
-            leave_dates.append(iso)
-            summary[leave.leave_type] += 1
-            weekday = calendar.day_name[current.weekday()]
-            weekday_freq[weekday] += 1
-            current += timedelta(days=1)
+class StandardResponse(BaseModel):
+    """Standard API response model"""
+    message: str
+    status: str
+    data: Optional[Any] = None
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
 
-    return {
-        "username": user.username,
-        "monthly_summary": dict(summary),
-        "leave_dates": sorted(leave_dates),
-        "frequent_days": dict(weekday_freq)
-    }
+    class Config:
+        schema_extra = {
+            "example": {
+                "message": "Operation completed successfully",
+                "status": "success",
+                "data": {},
+                "timestamp": "2024-01-01T12:00:00"
+            }
+        }
 
-# ------------------ Manager: Pending Leaves ------------------
-@router.get("/manager/pending-leaves")
-def get_pending_leaves(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Get all pending leave requests for associates in manager's team"""
+
+# ==================== UTILITY FUNCTIONS ====================
+
+def handle_api_error(error: Exception, default_message: str = "An error occurred") -> HTTPException:
+    """Standardized error handling"""
+    if isinstance(error, ValidationError):
+        logger.warning(f"Validation error: {error}")
+        return HTTPException(status_code=400, detail=str(error))
+    elif isinstance(error, LeaveProcessingError):
+        logger.error(f"Processing error: {error}")
+        return HTTPException(status_code=422, detail=str(error))
+    elif isinstance(error, HTTPException):
+        return error
+    else:
+        logger.error(f"Unexpected error: {error}")
+        return HTTPException(status_code=500, detail=default_message)
+
+
+def validate_team_access(current_user: User) -> int:
+    """Validate user has team access and return team_id"""
+    team_id = current_user.team_id
+    if not team_id:
+        raise HTTPException(status_code=400, detail="User not assigned to any team")
+    return team_id
+
+
+def validate_manager_access(current_user: User) -> int:
+    """Validate user is a manager and return user_id"""
     if current_user.role != "manager":
-        logger.warning(f"Unauthorized access attempt by {current_user.username} to manager endpoint")
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized")
+        raise HTTPException(status_code=403, detail="Only managers can access this resource")
+    return current_user.id
 
-    associates = db.query(User).filter_by(team_id=current_user.team_id, role="associate").all()
+
+# ==================== CORE LEAVE ROUTES ====================
+
+@router.get("/me")
+def get_profile(current_user: User = Depends(get_current_user)):
+    """Get current user profile"""
+    return current_user
+
+
+@router.post("/apply", response_model=StandardResponse, status_code=status.HTTP_201_CREATED)
+async def apply_for_leave(
+    request: LeaveApplicationRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Apply for leave with comprehensive validation and processing"""
+    try:
+        start_date = parse_safe_date(request.start_date)
+        end_date = parse_safe_date(request.end_date)
+        if start_date > end_date:
+            raise ValidationError("Start date cannot be after end date")
+        
+        leave_data = {
+            "user_id": current_user.id,
+            "leave_type": request.leave_type,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+            "backup_person": request.backup_person,
+            "is_half_day": request.is_half_day,
+            "reason": request.reason
+        }
+        
+        result = process_leave_application(db, leave_data)
+        if result["status"] == "error":
+            raise HTTPException(status_code=400, detail=result["message"])
+        
+        return StandardResponse(
+            message=result["message"],
+            status="success",
+            data={
+                "leave_id": result.get("leave_id"),
+                "leave_type": request.leave_type,
+                "start_date": request.start_date,
+                "end_date": request.end_date
+            }
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to process leave application")
+
+
+@router.delete("/cancel/{leave_id}", response_model=StandardResponse)
+async def cancel_leave(
+    leave_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Cancel/delete a leave request"""
+    try:
+        if leave_id <= 0:
+            raise ValidationError("Invalid leave ID")
+        
+        result = soft_delete_leave(db, current_user.id, leave_id)
+        if result["status"] == "error":
+            raise HTTPException(status_code=400, detail=result["message"])
+        
+        return StandardResponse(
+            message=result["message"],
+            status="success",
+            data={"leave_id": leave_id}
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to cancel leave")
+
+
+@router.get("/history", response_model=StandardResponse)
+async def get_leave_history(
+    year: Optional[int] = Query(None, description="Year (defaults to current year)", ge=2020, le=2030),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get user's leave history for a specific year"""
+    try:
+        if year and (year < 2020 or year > 2030):
+            raise ValidationError("Year must be between 2020 and 2030")
+        
+        history = get_user_leave_history(db, current_user.id, year)
+        
+        return StandardResponse(
+            message="Leave history retrieved successfully",
+            status="success",
+            data={
+                "history": history,
+                "year": year or datetime.now().year,
+                "total_requests": len(history)
+            }
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to get leave history")
+
+
+@router.get("/balance", response_model=StandardResponse)
+async def get_balance_summary(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get user's comprehensive leave balance summary"""
+    try:
+        balance_summary = get_leave_balance_summary(db, current_user.id)
+        if "error" in balance_summary:
+            raise HTTPException(status_code=400, detail=balance_summary["error"])
+        
+        return StandardResponse(
+            message="Balance summary retrieved successfully",
+            status="success",
+            data=balance_summary
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to get balance summary")
+
+
+@router.get("/validate-modification/{leave_id}", response_model=StandardResponse)
+async def validate_modification(
+    leave_id: int,
+    new_start_date: Optional[str] = Query(None, description="New start date in YYYY-MM-DD format"),
+    new_end_date: Optional[str] = Query(None, description="New end date in YYYY-MM-DD format"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Validate if a leave request can be modified"""
+    try:
+        if leave_id <= 0:
+            raise ValidationError("Invalid leave ID")
+        
+        new_start = parse_safe_date(new_start_date) if new_start_date else None
+        new_end = parse_safe_date(new_end_date) if new_end_date else None
+        
+        if new_start and new_end and new_start > new_end:
+            raise ValidationError("New start date cannot be after new end date")
+        
+        validation_result = validate_leave_request_modification(
+            db, leave_id, current_user.id, new_start, new_end
+        )
+        
+        return StandardResponse(
+            message="Validation completed",
+            status="success",
+            data=validation_result
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to validate modification")
+
+
+# ==================== TEAM & SHRINKAGE ROUTES ====================
+
+@router.get("/dashboard/shrinkage", response_model=StandardResponse)
+async def get_team_dashboard_shrinkage(
+    date: Optional[str] = Query(None, description="Date in YYYY-MM-DD format (defaults to today)"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get team or manager shrinkage data for dashboard display"""
+    try:
+        target_date = parse_safe_date(date) if date else None
+
+        if current_user.role == "manager":
+            shrinkage_data = get_manager_dashboard_shrinkage(db, current_user.id, target_date)
+            team_id = None  # Manager may have multiple teams
+        else:
+            team_id = validate_team_access(current_user)
+            shrinkage_data = get_dashboard_shrinkage(db, team_id, target_date)
+
+        return StandardResponse(
+            message="Shrinkage data retrieved successfully",
+            status="success",
+            data={
+                **shrinkage_data,
+                "team_id": team_id
+            }
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to get shrinkage data")
+
+
+@router.get("/dashboard/on-leave-today", response_model=StandardResponse)
+async def get_associates_on_leave_today(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Return associates on leave today for the manager."""
+    from datetime import datetime
+    today = datetime.now().date()
+    if current_user.role != "manager":
+        return StandardResponse(message="Not authorized", status="error", data=[])
+    # Get associates reporting to this manager
+    associates = db.query(User).filter_by(reports_to_id=current_user.id, role='associate').all()
     associate_ids = [a.id for a in associates]
-
+    from app.models import LeaveRequest
     leaves = db.query(LeaveRequest).filter(
         LeaveRequest.user_id.in_(associate_ids),
-        LeaveRequest.status == "Pending"
+        LeaveRequest.status == "Approved",
+        LeaveRequest.start_date <= today,
+        LeaveRequest.end_date >= today
     ).all()
-
-    return [
+    data = [
         {
-            "leave_id": l.id,
-            "associate": db.query(User).get(l.user_id).username,
-            "leave_type": l.leave_type,
-            "start_date": l.start_date,
-            "end_date": l.end_date,
-            "backup_person": l.backup_person,
-            "is_half_day": l.is_half_day
+            "username": leave.user.username,
+            "leave_type": leave.leave_type,
+            "is_half_day": leave.is_half_day
         }
-        for l in leaves
+        for leave in leaves
     ]
+    return StandardResponse(message="Associates on leave today", status="success", data=data)
 
-# ------------------ Manager: Approve/Reject Leave ------------------
-
-
-from fastapi import Request
-
-# ------------------ Improved Email Handling Function ------------------
-async def send_email_with_error_handling(email_func, *args, **kwargs):
-    """Wrapper function to handle email sending errors consistently"""
-    try:
-        result = email_func(*args, **kwargs)
-        if hasattr(result, "__await__"):
-            await result  # If email_func is async
-        return True
-    except Exception as e:
-        logger.error(f"Failed to send email: {str(e)}")
-        # Continue execution - email failure shouldn't block API response
-        return False
-
-# ------------------ Manager: Approve/Reject Leave with Better Email Handling ------------------
-@router.post("/manager/leave-decision")
-async def approve_or_reject_leave(
-    data: LeaveDecisionRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_manager_user)
+@router.get("/shrinkage/monthly", response_model=StandardResponse)
+async def get_team_monthly_shrinkage(
+    year: int = Query(..., description="Year", ge=2020, le=2030),
+    month: int = Query(..., description="Month (1-12)", ge=1, le=12),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    """Approve or reject a pending leave request"""
-    leave_id = data.leave_id
-    decision = data.decision
-    comments = data.comments
+    """Get monthly shrinkage percentage for team"""
+    try:
+        team_id = validate_team_access(current_user)
+        shrinkage = get_monthly_shrinkage(db, team_id, year, month)
+        
+        return StandardResponse(
+            message="Monthly shrinkage retrieved successfully",
+            status="success",
+            data={
+                "year": year,
+                "month": month,
+                "shrinkage": shrinkage,
+                "team_id": team_id,
+                "status": "Safe" if shrinkage < 6 else "Tight" if shrinkage <= 10 else "Overbooked"
+            }
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to get monthly shrinkage")
 
-    request_id = request.headers.get("X-Request-ID", "unknown")
-    logger.info(f"Processing leave decision. Request ID: {request_id}, Leave ID: {leave_id}, Decision: {decision}")
 
-    leave = db.query(LeaveRequest).get(leave_id)
-    if not leave:
-        logger.warning(f"Leave not found. ID: {leave_id}, Request ID: {request_id}")
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leave not found")
+@router.get("/forecast/30days", response_model=StandardResponse)
+async def get_30_day_forecast(
+    user_id: Optional[int] = Query(None, description="Associate user ID (for managers)"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get next 30 days leave forecast with shrinkage analysis"""
+    try:
+        # If manager and user_id is provided, show for that associate
+        if current_user.role == "manager" and user_id:
+            forecast_data = get_next_30_day_shrinkage(db, user_id)
+        elif current_user.role == "manager":
+            forecast_data = get_manager_next_30_day_shrinkage(db, current_user.id)
+        else:
+            forecast_data = get_next_30_day_shrinkage(db, current_user.id)
 
-    user = db.query(User).get(leave.user_id)
-    if not user or user.team_id != current_user.team_id:
-        logger.warning(f"Unauthorized leave decision attempt. Manager: {current_user.username}, Leave: {leave_id}")
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Leave request not in your team")
+        # If forecast_data is empty, fill with default days (so chart always renders)
+        if not forecast_data:
+            today = datetime.now().date()
+            forecast_data = [
+                {"date": (today + timedelta(days=i)).isoformat(), "shrinkage": 0, "availability": 100, "status": "Safe", "on_leave": []}
+                for i in range(30)
+                if (today + timedelta(days=i)).weekday() < 5
+            ]
 
-    if leave.status != "Pending":
-        logger.warning(f"Leave already acted on. ID: {leave_id}, Status: {leave.status}")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Leave already acted on")
+        # Calculate summary statistics
+        working_days = [day for day in forecast_data if day.get("date")]
+        avg_shrinkage = sum(day.get("shrinkage", 0) for day in working_days) / len(working_days) if working_days else 0
+        high_risk_days = len([day for day in working_days if day.get("shrinkage", 0) > 10])
 
-    # Update status
-    leave.status = decision
-    db.commit()
+        return StandardResponse(
+            message="30-day forecast retrieved successfully",
+            status="success",
+            data={
+                "forecast": forecast_data,
+                "summary": {
+                    "total_working_days": len(working_days),
+                    "average_shrinkage": round(avg_shrinkage, 2),
+                    "high_risk_days": high_risk_days,
+                    "forecast_period": "Next 30 days"
+                }
+            }
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to get forecast data")
+# ==================== MANAGER-ONLY ROUTES ====================
 
-    # Log the action
-    log = LeaveLog(
-        leave_request_id=leave.id,
-        changed_by=current_user.username,
-        action=decision,
-        comments=comments or f"{decision} by manager"
+@router.get("/shrinkage/weekly-carry-forward", response_model=StandardResponse)
+async def get_weekly_shrinkage_with_carry_forward(
+    year: Optional[int] = Query(None, description="Year (defaults to current year)", ge=2020, le=2030),
+    month: Optional[int] = Query(None, description="Month (defaults to current month)", ge=1, le=12),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get weekly shrinkage with carry forward calculation (Manager only)"""
+    try:
+        manager_id = validate_manager_access(current_user)
+        result = calculate_weekly_shrinkage_with_carry_forward(db, manager_id, year, month)
+        
+        return StandardResponse(
+            message="Weekly shrinkage with carry forward retrieved successfully",
+            status="success",
+            data=result
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to get weekly shrinkage data")
+
+# @router.get("/analytics", response_model=StandardResponse)
+# async def get_team_analytics(
+#     user_id: Optional[int] = Query(None, description="Associate user ID (optional)"),
+#     month: Optional[str] = Query(None, description="Month name or 'All' (optional)"),
+#     year: Optional[int] = Query(None, description="Year (defaults to current year)", ge=2020, le=2030),
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """Get comprehensive leave analytics for team or associate (Manager/Team Lead only)"""
+#     try:
+#         if current_user.role not in ["manager", "team_lead"]:
+#             raise HTTPException(status_code=403, detail="Insufficient permissions to access analytics")
+        
+#         if user_id:
+#             # You need to implement this function in your logic.py
+#             summary = get_user_monthly_leave_summary(db, user_id, month, year)
+#             return StandardResponse(
+#                 message="Leave pattern summary retrieved successfully",
+#                 status="success",
+#                 data=summary
+#             )
+#         else:
+#             team_id = validate_team_access(current_user)
+#             analytics_data = get_leave_analytics(db, team_id, year)
+#             if "error" in analytics_data:
+#                 raise HTTPException(status_code=400, detail=analytics_data["error"])
+#             return StandardResponse(
+#                 message="Analytics retrieved successfully",
+#                 status="success",
+#                 data=analytics_data
+#             )
+#     except Exception as e:
+#         raise handle_api_error(e, "Failed to get analytics")
+@router.get("/team/availability-summary", response_model=StandardResponse)
+async def team_availability_summary(
+    days: int = 30,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get a comprehensive availability summary for the current user's team."""
+    try:
+        team_id = validate_team_access(current_user)
+        summary = get_team_availability_summary(db, team_id, days)
+        if "error" in summary:
+            raise HTTPException(status_code=400, detail=summary["error"])
+        return StandardResponse(
+            message="Team availability summary retrieved successfully",
+            status="success",
+            data=summary
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to get team availability summary")
+
+@router.get("/pending-approvals", response_model=StandardResponse)
+async def get_pending_leave_approvals(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get pending leave requests for manager approval (Manager only)"""
+    try:
+        manager_id = validate_manager_access(current_user)
+        pending_approvals = get_pending_approvals(db, manager_id)
+        
+        # Group by priority/urgency
+        urgent_leaves = [leave for leave in pending_approvals 
+                        if datetime.strptime(leave["start_date"], "%Y-%m-%d").date() <= 
+                        (datetime.now().date() + timedelta(days=7))]
+        
+        return StandardResponse(
+            message="Pending approvals retrieved successfully",
+            status="success",
+            data={
+                "pending_leaves": pending_approvals,
+                "total_pending": len(pending_approvals),
+                "urgent_approvals": len(urgent_leaves),
+                "urgent_leaves": urgent_leaves
+            }
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to get pending approvals")
+
+
+@router.post("/approve/{leave_id}", response_model=StandardResponse)
+async def approve_or_reject_leave(
+    leave_id: int,
+    request: LeaveApprovalRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Approve or reject a leave request (Manager only)"""
+    try:
+        manager_id = validate_manager_access(current_user)
+        
+        if leave_id <= 0:
+            raise ValidationError("Invalid leave ID")
+            
+        result = approve_reject_leave(
+            db, leave_id, manager_id, request.action, request.comments
+        )
+        
+        if result["status"] == "error":
+            raise HTTPException(status_code=400, detail=result["message"])
+            
+        return StandardResponse(
+            message=result["message"],
+            status="success",
+            data={
+                "leave_id": result.get("leave_id"),
+                "action": request.action,
+                "processed_by": current_user.username
+            }
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to process leave approval")
+
+
+# ==================== UTILITY ROUTES ====================
+
+@router.get("/health", response_model=StandardResponse)
+async def health_check():
+    """Health check endpoint for service monitoring"""
+    return StandardResponse(
+        message="Leave management service is healthy",
+        status="success",
+        data={
+            "service": "leave-management",
+            "version": "2.0.0",
+            "timestamp": datetime.now().isoformat(),
+            "uptime": "Service is operational"
+        }
     )
-    db.add(log)
-    db.commit()
 
-    # Notify by email
-    email_sent = await send_email_with_error_handling(
-        send_leave_email,
-        to_email=f"{user.username}@company.com",
-        associate_name=user.username,
-        leave_type=leave.leave_type,
-        start_date=leave.start_date,
-        end_date=leave.end_date,
-        status=decision,
-        backup_name=leave.backup_person
-    )
 
-    # Create in-app notification
-    notification = Notification(
-        user_id=user.id,
-        message=f"Your {leave.leave_type} leave request from {leave.start_date} to {leave.end_date} has been {decision.lower()}."
-    )
-    db.add(notification)
-    db.commit()
+@router.get("/team/members", response_model=StandardResponse)
+async def get_team_members(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get list of team members (for backup person selection, etc.)"""
+    try:
+        if current_user.role == "manager":
+            # Managers: all associates who report to them
+            team_members = db.query(User).filter(
+                User.reports_to_id == current_user.id,
+                User.role == 'associate'
+            ).all()
+            team_id = None  # Managers may have multiple teams
+        else:
+            # Team leads: all associates in their team (excluding self)
+            team_id = validate_team_access(current_user)
+            team_members = db.query(User).filter(
+                User.team_id == team_id,
+                User.role == 'associate',
+                User.id != current_user.id
+            ).all()
 
-    result = {"message": f"Leave {decision.lower()} successfully."}
-    if not email_sent:
-        result["warning"] = "Notification sent but email delivery failed"
+        members_list = [
+            {
+                "id": member.id,
+                "username": member.username,
+                "full_name": getattr(member, 'full_name', member.username)
+            }
+            for member in team_members
+        ]
+        
+        return StandardResponse(
+            message="Team members retrieved successfully",
+            status="success",
+            data={
+                "team_id": team_id,
+                "members": members_list,
+                "total_members": len(members_list)
+            }
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to get team members")
 
-    return result
 
-# ------------------ Leave Summary ------------------
-@router.get("/leave/summary")
-def get_leave_summary(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Get summary of user's leave history"""
-    leaves = db.query(LeaveRequest).filter_by(user_id=current_user.id).all()
+@router.get("/stats/dashboard", response_model=StandardResponse)
+async def get_dashboard_stats(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get dashboard statistics for user overview"""
+    try:
+        user_id = current_user.id
+        
+        # Get user's current balances
+        balance_summary = get_leave_balance_summary(db, user_id)
+        
+        # Get pending requests
+        pending_leaves = db.query(LeaveRequest).filter(
+            LeaveRequest.user_id == user_id,
+            LeaveRequest.status == 'Pending'
+        ).count()
+        
+        # Get upcoming leaves
+        upcoming_leaves = db.query(LeaveRequest).filter(
+            LeaveRequest.user_id == user_id,
+            LeaveRequest.status == 'Approved',
+            LeaveRequest.start_date >= datetime.now().date()
+        ).count()
+        
+        # Get team shrinkage if user has team
+        team_shrinkage = None
+        if current_user.team_id:
+            shrinkage_data = get_dashboard_shrinkage(db, current_user.team_id)
+            team_shrinkage = shrinkage_data
+        
+        return StandardResponse(
+            message="Dashboard stats retrieved successfully",
+            status="success",
+            data={
+                "user_stats": {
+                    "pending_requests": pending_leaves,
+                    "upcoming_leaves": upcoming_leaves,
+                    "monthly_quota_used": balance_summary.get("current_month_leave_count", 0),
+                    "monthly_quota_remaining": balance_summary.get("remaining_monthly_quota", 0)
+                },
+                "leave_balances": balance_summary.get("available_balances", {}),
+                "team_shrinkage": team_shrinkage
+            }
+        )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to get dashboard stats")
+    
 
-    summary = defaultdict(int)
-    total_days = 0
 
-    for leave in leaves:
-        if leave.status in ("Approved", "Cancelled"):
-            days = (leave.end_date - leave.start_date).days + 1
-            total_days += days
-            summary[leave.leave_type] += days
 
+
+@router.get("/notifications")
+async def get_notifications(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get notifications for the current user.
+    """
+    notifications = db.query(Notification).filter(
+        Notification.user_id == current_user.id
+    ).order_by(Notification.created_at.desc()).all()
+    # Convert to dicts for JSON response
     return {
-        "total_days": total_days,
-        "by_type": dict(summary),
-        "count": len(leaves)
+        "status": "success",
+        "data": {
+            "notifications": [
+                {
+                    "id": n.id,
+                    "message": n.message,
+                    "created_at": n.created_at,
+                    "read": n.read
+                } for n in notifications
+            ]
+        }
     }
 
-@router.get("/leave/my", response_model=List[LeaveResponse])
-def get_my_leaves(
-    db: Session = Depends(get_db),
+@router.get("/analytics", response_model=StandardResponse)
+async def get_team_analytics(
+    user_id: Optional[int] = Query(None, description="Associate user ID (optional)"),
+    month: Optional[str] = Query(None, description="Month name or 'All' (optional)"),
+    year: Optional[int] = Query(None, description="Year (defaults to current year)", ge=2020, le=2030),
     current_user: User = Depends(get_current_user),
-    status: Optional[str] = None,
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None
+    db: Session = Depends(get_db)
 ):
-    """Get current user's leave requests with optional filters"""
-    query = db.query(LeaveRequest).filter_by(user_id=current_user.id)
-    
-    # Apply filters if provided
-    if status:
-        query = query.filter(LeaveRequest.status == status)
-    
-    if from_date:
-        try:
-            parsed_from = datetime.strptime(from_date, "%Y-%m-%d").date()
-            query = query.filter(LeaveRequest.start_date >= parsed_from)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid from_date format. Use YYYY-MM-DD")
-    
-    if to_date:
-        try:
-            parsed_to = datetime.strptime(to_date, "%Y-%m-%d").date()
-            query = query.filter(LeaveRequest.end_date <= parsed_to)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid to_date format. Use YYYY-MM-DD")
-    
-    # Execute query and sort results
-    leaves = query.order_by(LeaveRequest.start_date.desc()).all()
-    
-    return [
-        {
-            "id": l.id,
-            "leave_type": l.leave_type,
-            "start_date": l.start_date.isoformat(),
-            "end_date": l.end_date.isoformat(),
-            "status": l.status,
-            "backup_person": l.backup_person
-        }
-        for l in leaves
-    ]
+    """Get comprehensive leave analytics for team or associate (Manager/Team Lead only)"""
+    try:
+        if current_user.role not in ["manager", "team_lead"]:
+            raise HTTPException(status_code=403, detail="Insufficient permissions to access analytics")
+        
+        if user_id:
+            # You need to implement this function in your logic.py
+            summary = get_user_monthly_leave_summary(db, user_id, month, year)
+            return StandardResponse(
+                message="Leave pattern summary retrieved successfully",
+                status="success",
+                data=summary
+            )
+        else:
+            team_id = validate_team_access(current_user)
+            analytics_data = get_leave_analytics(db, team_id, year)
+            if "error" in analytics_data:
+                raise HTTPException(status_code=400, detail=analytics_data["error"])
+            return StandardResponse(
+                message="Analytics retrieved successfully",
+                status="success",
+                data=analytics_data
+            )
+    except Exception as e:
+        raise handle_api_error(e, "Failed to get analytics")
 
-@router.get("/manager/monthly-shrinkage")
-def get_manager_shrinkage(
-    year: int = Query(...),
-    month: int = Query(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+
+@router.get("/shrinkage/next30days")
+async def get_next_30_days_shrinkage(
+    user_id: int,
+    db: Session = Depends(get_db)
 ):
-    """Get weekly shrinkage with carry forward for the manager's team"""
-    if current_user.role != "manager":
-        raise HTTPException(status_code=403, detail="Only managers can access this")
-    return calculate_weekly_shrinkage_with_carry_forward(db, current_user.id, year, month)
-
-
-@router.put("/leave/{leave_id}")
-def edit_leave(
-    leave_id: int,
-    data: LeaveEdit,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    leave = db.query(LeaveRequest).get(leave_id)
-    if not leave:
-        raise HTTPException(status_code=404, detail="Leave not found")
-    if leave.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not your leave")
-
-    if leave.status not in ("Pending", "Approved"):
-        raise HTTPException(status_code=400, detail="Cannot edit this leave")
-
-    leave.leave_type = data.leave_type or leave.leave_type
-    leave.start_date = datetime.strptime(data.start_date, "%Y-%m-%d").date()
-    leave.end_date = datetime.strptime(data.end_date, "%Y-%m-%d").date()
-    leave.backup_person = data.backup_person or leave.backup_person
-
-    db.commit()
-    db.add(LeaveLog(
-        leave_request_id=leave.id,
-        changed_by=current_user.username,
-        action="Edited",
-        comments="Leave details updated by user"
-    ))
-    db.commit()
-
-    return {"message": "Leave updated successfully"}
-
-from .logic import decrement_monthly_leave_count, increment_leave_balance
-
-@router.delete("/leave/{leave_id}")
-def cancel_leave(
-    leave_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    leave = db.query(LeaveRequest).get(leave_id)
-    if not leave:
-        raise HTTPException(status_code=404, detail="Leave not found")
-    if leave.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not your leave")
-    if leave.status not in ("Pending", "Approved"):
-        raise HTTPException(status_code=400, detail="Leave cannot be cancelled")
-
-    leave_days = (leave.end_date - leave.start_date).days + 1
-    leave.status = "Cancelled"
-    db.commit()
-
-    # Reverse monthly count and balance
-    decrement_monthly_leave_count(db, leave.user_id)
-    increment_leave_balance(db, leave.user_id, leave.leave_type, leave_days)
-
-    db.add(LeaveLog(
-        leave_request_id=leave.id,
-        changed_by=current_user.username,
-        action="Cancelled",
-        comments="Cancelled by user"
-    ))
-    db.commit()
-
-    return {"message": "Leave cancelled successfully"}
+    user = db.get(User, user_id)
+    if user and user.role == "manager":
+        return get_manager_next_30_day_shrinkage(db, user_id)
+    else:
+        return get_next_30_day_shrinkage(db, user_id)

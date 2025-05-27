@@ -1,8 +1,6 @@
-// src/components/admin/L5Dashboard.js
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import { format, startOfWeek, endOfWeek, isWithinInterval } from 'date-fns';
-
 
 const SHRINKAGE_THRESHOLDS = {
   safe: 10,
@@ -26,10 +24,11 @@ const L5Dashboard = ({ user }) => {
 
   const fetchData = async () => {
     try {
-      const res = await axios.get('/admin/availability/next-30-days', {
+      // Updated endpoint to match backend
+      const res = await axios.get('/api/v1/leave/forecast/30days', {
         headers: { Authorization: `Bearer ${user.token}` }
       });
-      setCalendar(res.data || []);
+      setCalendar(res.data.data?.forecast || []);
     } catch (err) {
       console.error('Error fetching L5 calendar');
     }
@@ -66,7 +65,7 @@ const L5Dashboard = ({ user }) => {
               {format(new Date(entry.date), 'MMMM dd, yyyy')}
             </h2>
             <div className="mt-2 space-y-2">
-              {Object.entries(entry.shrinkage_by_team).map(([team, shrinkage]) => (
+              {Object.entries(entry.shrinkage_by_team || {}).map(([team, shrinkage]) => (
                 <div
                   key={team}
                   className={`p-2 rounded text-sm font-medium flex justify-between ${getColor(shrinkage)}`}
@@ -81,7 +80,7 @@ const L5Dashboard = ({ user }) => {
       </div>
 
       {/* 👇 Add Widget Box */}
-      <Add />
+      {/* <Add /> */}
     </div>
   );
 };

@@ -1,131 +1,149 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { format } from 'date-fns';
 import toast from 'react-hot-toast';
+import { format } from 'date-fns';
 import { FaCheckCircle, FaTimesCircle } from 'react-icons/fa';
 
-const PendingApprovals = ({ user }) => {
+const PendingApprovals = ({ user, refreshKey, colorTheme = 'vibrant', theme }) => {
   const [requests, setRequests] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [confirmRejectId, setConfirmRejectId] = useState(null);
 
-  // Fetch pending leaves on mount
   useEffect(() => {
-    fetchPending();
-    // eslint-disable-next-line
-  }, []);
-
-  const fetchPending = async () => {
-    try {
-      const res = await axios.get('/manager/pending-leaves', {
-        headers: { Authorization: `Bearer ${user.token}` }
-      });
-      setRequests(res.data);
-    } catch (err) {
-      toast.error('Failed to fetch pending leaves');
-    }
-  };
+    const fetchData = async () => {
+      setLoading(true);
+      try {
+        const res = await axios.get('/api/v1/leave/pending-approvals', {
+          headers: { Authorization: `Bearer ${user.token}` },
+        });
+        setRequests(res.data.data?.pending_leaves || []);
+      } catch {
+        toast.error('Failed to fetch pending leaves');
+      } finally {
+        setLoading(false);
+      }
+    };
+    if (user?.token) fetchData();
+  }, [user, refreshKey]);
 
   const handleApprove = async (id) => {
     try {
-      await axios.post('/manager/leave-decision', {
-        leave_id: id,
-        decision: 'approved'
-      }, {
-        headers: { Authorization: `Bearer ${user.token}` }
-      });
-      toast.success('Leave approved successfully');
-      fetchPending();
+      await axios.post(
+        `/api/v1/leave/approve/${id}`,
+        { action: 'Approved', comments: 'Approved via UI' },
+        {
+          headers: {
+            Authorization: `Bearer ${user.token}`,
+            'X-Request-ID': `ui-approve-${id}`,
+          },
+        }
+      );
+      toast.success('Leave approved');
+      setRequests((prev) => prev.filter((r) => r.leave_id !== id));
     } catch (err) {
-      toast.error('Failed to approve leave');
+      toast.error(err?.response?.data?.detail || 'Approval failed');
     }
-  };
-
-  const handleConfirmReject = (id) => {
-    setConfirmRejectId(id);
-  };
-
-  const handleCancelReject = () => {
-    setConfirmRejectId(null);
   };
 
   const handleFinalReject = async () => {
     try {
-      await axios.post('/manager/leave-decision', {
-        leave_id: confirmRejectId,
-        decision: 'rejected'
-      }, {
-        headers: { Authorization: `Bearer ${user.token}` }
-      });
-      toast.error('Leave rejected');
+      await axios.post(
+        `/api/v1/leave/approve/${confirmRejectId}`,
+        { action: 'Rejected', comments: 'Rejected via UI' },
+        {
+          headers: {
+            Authorization: `Bearer ${user.token}`,
+            'X-Request-ID': `ui-reject-${confirmRejectId}`,
+          },
+        }
+      );
+      toast.success('Leave rejected');
+      setRequests((prev) => prev.filter((r) => r.leave_id !== confirmRejectId));
       setConfirmRejectId(null);
-      fetchPending();
     } catch (err) {
-      toast.error('Failed to reject leave');
+      toast.error(err?.response?.data?.detail || 'Rejection failed');
     }
   };
 
   return (
-    <div className="bg-white rounded-xl shadow p-6 space-y-4 relative">
-      <h2 className="text-xl font-bold text-blue-700 mb-2">Pending Approvals</h2>
+    <div className="p-6 space-y-6">
+      {/* Header */}
+      <div className="flex items-center space-x-3">
+        <div className={`p-2 rounded-lg bg-gradient-to-r ${theme?.cardAccent} shadow-sm`}>
+          <FaCheckCircle className="h-5 w-5 text-white" />
+        </div>
+        <div>
+          <h2 className={`text-xl font-bold ${theme?.text}`}>Pending Approvals</h2>
+          <p className="text-sm text-gray-500">
+            {loading ? 'Loading...' : `${requests.length} pending request(s)`}
+          </p>
+        </div>
+      </div>
 
-      {requests.length === 0 ? (
-        <p className="text-sm text-gray-500">No pending leave requests.</p>
+      {/* Content */}
+      {loading ? (
+        <div className="flex items-center justify-center py-10">
+          <div className={`animate-spin h-6 w-6 border-b-2 ${theme.spinner} rounded-full`}></div>
+          <span className={`ml-3 text-sm font-medium ${theme.text}`}>Fetching requests...</span>
+        </div>
+      ) : requests.length === 0 ? (
+        <div className="text-center text-gray-500 py-10">No pending leave requests.</div>
       ) : (
-        <div className="space-y-3 max-h-80 overflow-y-auto pr-1 custom-scroll">
+        <div className="space-y-4 max-h-96 overflow-y-auto pr-1 custom-scroll">
           {requests.map((req) => (
             <div
               key={req.leave_id}
-              className="flex justify-between items-center border-b pb-2 hover:bg-gray-50 rounded-md px-2 transition"
+              className={`rounded-lg border border-gray-200 p-4 shadow-sm transition-all duration-200 hover:shadow-md hover:scale-[1.01] ${theme.cardGradient}`}
             >
-              <div>
-                <p className="font-semibold text-gray-700">
-                  {req.associate} <span className="text-sm text-gray-400">({req.leave_type})</span>
-                </p>
-                <p className="text-sm text-gray-500">
-                  {format(new Date(req.start_date), 'dd MMM yyyy')} →{' '}
-                  {format(new Date(req.end_date), 'dd MMM yyyy')}
-                </p>
-              </div>
-
-              <div className="flex gap-2">
-                <button
-                  onClick={() => handleApprove(req.leave_id)}
-                  className="flex items-center gap-1 px-3 py-1 text-sm text-white bg-green-600 rounded hover:bg-green-700"
-                >
-                  <FaCheckCircle /> Approve
-                </button>
-                <button
-                  onClick={() => handleConfirmReject(req.leave_id)}
-                  className="flex items-center gap-1 px-3 py-1 text-sm text-white bg-red-500 rounded hover:bg-red-600"
-                >
-                  <FaTimesCircle /> Reject
-                </button>
+              <div className="flex justify-between items-start">
+                <div>
+                  <h3 className={`font-semibold ${theme.text}`}>{req.associate}</h3>
+                  <p className="text-sm text-gray-600">
+                    {format(new Date(req.start_date), 'dd MMM yyyy')} →{' '}
+                    {format(new Date(req.end_date), 'dd MMM yyyy')}
+                  </p>
+                  <span className="inline-block mt-1 text-xs text-gray-400">
+                    {req.leave_type}
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => handleApprove(req.leave_id)}
+                    className="flex items-center gap-1 px-3 py-1 text-xs text-white bg-green-600 rounded hover:bg-green-700"
+                  >
+                    <FaCheckCircle /> Approve
+                  </button>
+                  <button
+                    onClick={() => setConfirmRejectId(req.leave_id)}
+                    className="flex items-center gap-1 px-3 py-1 text-xs text-white bg-red-500 rounded hover:bg-red-600"
+                  >
+                    <FaTimesCircle /> Reject
+                  </button>
+                </div>
               </div>
             </div>
           ))}
         </div>
       )}
 
-      {/* 🔒 Modal */}
+      {/* Confirmation Modal */}
       {confirmRejectId && (
-        <div className="absolute inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-lg p-6 w-96 space-y-4">
-            <h3 className="text-lg font-bold text-gray-800">Confirm Rejection</h3>
-            <p className="text-sm text-gray-600">
-              Are you sure you want to reject this leave request? This action cannot be undone.
-            </p>
-            <div className="flex justify-end gap-3">
+        <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-lg p-6 w-96 space-y-4">
+            <h3 className="text-lg font-semibold text-gray-800">Confirm Rejection</h3>
+            <p className="text-sm text-gray-600">Reject this leave request? This cannot be undone.</p>
+            <div className="flex justify-end gap-3 pt-2">
               <button
-                onClick={handleCancelReject}
-                className="px-4 py-2 text-sm bg-gray-200 rounded hover:bg-gray-300"
+                onClick={() => setConfirmRejectId(null)}
+                className="px-4 py-2 text-sm bg-gray-100 rounded hover:bg-gray-200"
               >
                 Cancel
               </button>
               <button
                 onClick={handleFinalReject}
-                className="px-4 py-2 text-sm text-white bg-red-500 rounded hover:bg-red-600"
+                className="px-4 py-2 text-sm bg-red-500 text-white rounded hover:bg-red-600"
               >
-                Reject
+                Confirm Reject
               </button>
             </div>
           </div>

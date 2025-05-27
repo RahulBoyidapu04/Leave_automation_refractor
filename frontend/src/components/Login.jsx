@@ -17,8 +17,8 @@ const Login = ({ onLogin }) => {
       });
       const token = res.data.access_token;
 
-      // Use relative path so Vite proxy works
-      const profile = await axios.get('/me', {
+      // Use the correct backend endpoint for user profile
+      const profile = await axios.get('/api/v1/leave/me', {
         headers: { Authorization: `Bearer ${token}` }
       });
 

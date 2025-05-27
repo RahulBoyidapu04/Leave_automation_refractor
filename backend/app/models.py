@@ -71,6 +71,13 @@ class LeaveRequest(Base):
     def __repr__(self):
         return f"<LeaveRequest(id={self.id}, user_id={self.user_id}, status={self.status})>"
 
+    def get_leave_days(self):
+        """Return 0.5 if it's a half day, else total days between start and end date inclusive"""
+        if not self.start_date or not self.end_date:
+            return 0
+        delta = (self.end_date - self.start_date).days + 1
+        return 0.5 if self.is_half_day else delta
+
 
 class Threshold(Base):
     __tablename__ = "thresholds"
@@ -123,3 +130,11 @@ class Notification(Base):
 
     def __repr__(self):
         return f"<Notification(id={self.id}, user_id={self.user_id}, message={self.message})>"
+
+from sqlalchemy import Column, Integer, Date
+from app.database import Base
+
+class OptionalLeaveDate(Base):
+    __tablename__ = "optional_leave_dates"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Date, unique=True, nullable=False)

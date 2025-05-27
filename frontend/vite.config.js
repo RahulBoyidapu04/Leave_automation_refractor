@@ -7,6 +7,7 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
+      '/api/v1/leave': 'http://localhost:8000', // <-- Add this line
       '/me': 'http://localhost:8000',
       '/apply-leave': 'http://localhost:8000',
       '/availability': 'http://localhost:8000',

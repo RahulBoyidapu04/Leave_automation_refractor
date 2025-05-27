@@ -35,8 +35,8 @@ const LeaveList = ({ leaves, onEdit, onCancel, onRefresh }) => {
               <div>
                 <p className="font-semibold text-gray-800 capitalize">{leave.leave_type}</p>
                 <p className="text-sm text-gray-500">
-                  {format(new Date(leave.start_date), 'dd MMM yyyy')} →{' '}
-                  {format(new Date(leave.end_date), 'dd MMM yyyy')}
+                  {format(new Date(leave.start_date + "T00:00:00"), 'dd MMM yyyy')} →{' '}
+                  {format(new Date(leave.end_date + "T00:00:00"), 'dd MMM yyyy')}
                 </p>
               </div>
 
@@ -48,7 +48,7 @@ const LeaveList = ({ leaves, onEdit, onCancel, onRefresh }) => {
                 </span>
 
                 {(leave.status === 'Pending' || leave.status === 'Approved') &&
-                  new Date(leave.start_date) > new Date() && (
+                  new Date(leave.start_date + "T00:00:00") > new Date() && (
                     <div className="flex gap-2 mt-1">
                       <button
                         className="p-1 rounded-full hover:bg-blue-100 text-blue-600"

@@ -8,3 +8,4 @@ pydantic
 fastapi
 fastapi-users
 reportlab
+pytz>=2023.3

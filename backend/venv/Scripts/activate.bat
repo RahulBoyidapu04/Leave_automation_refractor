@@ -8,7 +8,7 @@ if defined _OLD_CODEPAGE (
     "%SystemRoot%\System32\chcp.com" 65001 > nul
 )
 
-set VIRTUAL_ENV=C:\Users\rahulboy\Downloads\LeaveAutomation_CleanBundle_5_9\backend\venv
+set VIRTUAL_ENV=C:\Users\rahulboy\Downloads\New folder\leave\LeaveAutomation_CleanBundle_refractor\backend\venv
 
 if not defined PROMPT set PROMPT=$P$G
 

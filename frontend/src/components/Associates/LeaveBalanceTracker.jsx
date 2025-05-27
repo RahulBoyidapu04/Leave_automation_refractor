@@ -11,10 +11,13 @@ const LeaveBalanceTracker = ({ user }) => {
   useEffect(() => {
     const fetchBalance = async () => {
       try {
-        const res = await axios.get('/leave/summary', {
+        // Updated endpoint to match backend
+        const res = await axios.get('/api/v1/leave/balance', {
           headers: { Authorization: `Bearer ${user.token}` },
         });
-        setUsed(res.data.total_days || 0);
+        // Adjust this according to your backend response structure
+        setUsed(res.data.data?.current_month_leave_count || 0);
+        setTotal(res.data.data?.monthly_quota || 12);
       } catch (err) {
         toast.error('Failed to load leave balance');
       } finally {
