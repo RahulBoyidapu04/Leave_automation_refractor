@@ -9,7 +9,7 @@ import secrets
 from typing import Optional
 
 from .models import User
-from .database import get_db
+from app.database import get_db
 import logging
 
 # Configure logging - but don't log sensitive data

@@ -10,8 +10,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-
-
 # Constants
 SHRINKAGE_THRESHOLD = 10.0
 PLANNED_SHRINKAGE_THRESHOLD = 7.0
@@ -22,25 +20,19 @@ SAFE_SHRINKAGE_THRESHOLD = 6.0
 OPTIONAL_LEAVE_MAX_DAYS = 2
 EMAIL_DOMAIN = "@amazon.com"
 
-
-
 class LeaveProcessingError(Exception):
     """Custom exception for leave processing errors"""
     pass
 
-
 class ValidationError(Exception):
     """Custom exception for validation errors"""
     pass
-
-
 
 def validate_required_fields(data: Dict[str, Any], required_fields: List[str]) -> None:
     """Validate that all required fields are present in data"""
     missing_fields = [field for field in required_fields if field not in data or data[field] is None]
     if missing_fields:
         raise ValidationError(f"Missing required fields: {', '.join(missing_fields)}")
-
 
 def parse_safe_date(date_input: Union[str, datetime, date]) -> date:
     """Safely extract date from a string or datetime object."""
@@ -57,6 +49,14 @@ def parse_safe_date(date_input: Union[str, datetime, date]) -> date:
         logger.error(f"Date parsing error: {e}")
         raise ValidationError(f"Invalid date format: {date_input}")
 
+def is_optional_leave_day(db: Session, date: date) -> bool:
+    """Check if a date is an optional leave day"""
+    try:
+        from app.models import OptionalLeaveDate
+        return db.query(OptionalLeaveDate).filter_by(date=date).first() is not None
+    except Exception as e:
+        logger.error(f"Error checking optional leave day: {e}")
+        return False
 
 def get_team_shrinkage(db: Session, team_id: int, target_date: date) -> Dict[str, float]:
     """
@@ -107,45 +107,57 @@ def get_team_shrinkage(db: Session, team_id: int, target_date: date) -> Dict[str
         raise LeaveProcessingError(f"Database error calculating team shrinkage: {e}")
     except Exception as e:
         logger.error(f"Unexpected error in get_team_shrinkage: {e}")
-        logger.info(f"Shrinkage for team {team_id} on {target_date}: planned={planned_shrinkage}, sick={sick_shrinkage}, total={total_shrinkage}")
         raise LeaveProcessingError(f"Error calculating team shrinkage: {e}")
 
-# Example: Sum shrinkage for all teams managed by the manager
 def get_manager_dashboard_shrinkage(db: Session, manager_id: int, target_date: Optional[date] = None) -> Dict[str, Any]:
-    from app.models import User
-    if target_date is None:
-        target_date = datetime.now().date()
-    manager = db.get(User, manager_id)
-    if not manager or manager.role != 'manager':
+    """Sum shrinkage for all teams managed by the manager"""
+    try:
+        if target_date is None:
+            target_date = datetime.now().date()
+        
+        manager = db.get(User, manager_id)
+        if not manager or manager.role != 'manager':
+            return {
+                "date": target_date.isoformat(),
+                "shrinkage": 0.0,
+                "availability": 100.0,
+                "status": "Error",
+                "error": "Manager not found"
+            }
+        
+        # Get all unique team_ids for associates reporting to this manager
+        team_ids = db.query(User.team_id).filter(
+            User.reports_to_id == manager_id,
+            User.role == 'associate',
+            User.team_id.isnot(None)
+        ).distinct().all()
+        team_ids = [tid[0] for tid in team_ids]
+        
+        total_shrinkage = 0.0
+        for team_id in team_ids:
+            shrinkage_dict = get_team_shrinkage(db, team_id, target_date)
+            total_shrinkage += shrinkage_dict.get('total_shrinkage', 0.0)
+        
+        availability = 100 - total_shrinkage
         return {
             "date": target_date.isoformat(),
+            "shrinkage": total_shrinkage,
+            "availability": availability,
+            "status": (
+                "Safe" if total_shrinkage < SAFE_SHRINKAGE_THRESHOLD
+                else "Tight" if total_shrinkage <= SHRINKAGE_THRESHOLD
+                else "Overbooked"
+            )
+        }
+    except Exception as e:
+        logger.error(f"Error in get_manager_dashboard_shrinkage: {e}")
+        return {
+            "date": target_date.isoformat() if target_date else datetime.now().date().isoformat(),
             "shrinkage": 0.0,
             "availability": 100.0,
             "status": "Error",
-            "error": "Manager not found"
+            "error": str(e)
         }
-    # Get all unique team_ids for associates reporting to this manager
-    team_ids = db.query(User.team_id).filter(
-        User.reports_to_id == manager_id,
-        User.role == 'associate',
-        User.team_id.isnot(None)
-    ).distinct().all()
-    team_ids = [tid[0] for tid in team_ids]
-    total_shrinkage = 0.0
-    for team_id in team_ids:
-        shrinkage_dict = get_team_shrinkage(db, team_id, target_date)
-        total_shrinkage += shrinkage_dict.get('total_shrinkage', 0.0)
-    availability = 100 - total_shrinkage
-    return {
-        "date": target_date.isoformat(),
-        "shrinkage": total_shrinkage,
-        "availability": availability,
-        "status": (
-            "Safe" if total_shrinkage < SAFE_SHRINKAGE_THRESHOLD
-            else "Tight" if total_shrinkage <= SHRINKAGE_THRESHOLD
-            else "Overbooked"
-        )
-    }
 
 def get_dashboard_shrinkage(db: Session, team_id: int, target_date: Optional[date] = None) -> Dict[str, Any]:
     """Get dashboard shrinkage data with error handling"""
@@ -176,7 +188,6 @@ def get_dashboard_shrinkage(db: Session, team_id: int, target_date: Optional[dat
             "status": "Error",
             "error": str(e)
         }
-
 
 def get_monthly_shrinkage(db: Session, team_id: int, year: int, month: int) -> float:
     """Calculate monthly shrinkage with improved error handling and optimization"""
@@ -234,7 +245,6 @@ def get_monthly_shrinkage(db: Session, team_id: int, year: int, month: int) -> f
         logger.error(f"Unexpected error in get_monthly_shrinkage: {e}")
         raise LeaveProcessingError(f"Error calculating monthly shrinkage: {e}")
 
-
 def check_monthly_shrinkage_threshold(db: Session, team_id: int, month: int, year: int, 
                                     threshold: float = SHRINKAGE_THRESHOLD) -> bool:
     """Check if monthly shrinkage exceeds threshold with error handling"""
@@ -244,7 +254,6 @@ def check_monthly_shrinkage_threshold(db: Session, team_id: int, month: int, yea
     except Exception as e:
         logger.error(f"Error checking monthly shrinkage threshold: {e}")
         return False  # Default to safe value
-
 
 def check_weekly_shrinkage_threshold(db: Session, team_id: int, week_start: date, 
                                    week_end: date, threshold: float = SHRINKAGE_THRESHOLD) -> bool:
@@ -296,7 +305,6 @@ def check_weekly_shrinkage_threshold(db: Session, team_id: int, week_start: date
         logger.error(f"Unexpected error in check_weekly_shrinkage_threshold: {e}")
         return False
 
-
 def get_fcfs_position(db: Session, user_id: int, month_str: str, timestamp: Optional[datetime] = None) -> int:
     """Get user's position in FCFS queue for the month with error handling"""
     try:
@@ -320,7 +328,6 @@ def get_fcfs_position(db: Session, user_id: int, month_str: str, timestamp: Opti
         logger.error(f"Error getting FCFS position: {e}")
         return 1  # Default to first position
 
-
 def has_date_overlap(db: Session, user_id: int, start_date: date, end_date: date) -> bool:
     """Check if user has overlapping leave requests with error handling"""
     try:
@@ -338,7 +345,6 @@ def has_date_overlap(db: Session, user_id: int, start_date: date, end_date: date
         logger.error(f"Database error checking date overlap: {e}")
         return True  # Default to safe value (assume overlap)
 
-
 def get_monthly_leave_count(db: Session, user_id: int) -> int:
     """Get monthly leave count with error handling"""
     try:
@@ -348,7 +354,6 @@ def get_monthly_leave_count(db: Session, user_id: int) -> int:
     except SQLAlchemyError as e:
         logger.error(f"Database error getting monthly leave count: {e}")
         return 0
-
 
 def increment_monthly_leave(db: Session, user_id: int) -> None:
     """Increment monthly leave count with error handling"""
@@ -366,7 +371,6 @@ def increment_monthly_leave(db: Session, user_id: int) -> None:
         db.rollback()
         raise LeaveProcessingError(f"Failed to increment monthly leave count: {e}")
 
-
 def get_leave_balance(db: Session, user_id: int, leave_type: str) -> int:
     """Get leave balance with error handling"""
     try:
@@ -375,7 +379,6 @@ def get_leave_balance(db: Session, user_id: int, leave_type: str) -> int:
     except SQLAlchemyError as e:
         logger.error(f"Database error getting leave balance: {e}")
         return 0
-
 
 def decrement_leave_balance(db: Session, user_id: int, leave_type: str, days: float) -> bool:
     """Decrement leave balance with error handling"""
@@ -391,7 +394,6 @@ def decrement_leave_balance(db: Session, user_id: int, leave_type: str, days: fl
         db.rollback()
         return False
 
-
 def convert_cl_to_al(leave_type: str, start_date: date, end_date: date) -> str:
     """Convert CL to AL if leave duration exceeds threshold"""
     try:
@@ -402,12 +404,6 @@ def convert_cl_to_al(leave_type: str, start_date: date, end_date: date) -> str:
     except Exception as e:
         logger.error(f"Error converting leave type: {e}")
         return leave_type  # Return original if conversion fails
-
-
-def is_optional_leave_day(db: Session, date: date) -> bool:
-    # Assuming you have a model OptionalLeaveDate with a 'date' field
-    from app.models import OptionalLeaveDate
-    return db.query(OptionalLeaveDate).filter_by(date=date).first() is not None
 
 def process_leave_application(db: Session, data: Dict[str, Any]) -> Dict[str, Any]:
     """Process leave application with comprehensive error handling, validation, and auto-approval logic"""
@@ -713,7 +709,6 @@ def decrement_monthly_leave_count(db: Session, user_id: int) -> None:
         logger.error(f"Database error decrementing monthly leave count: {e}")
         db.rollback()
 
-
 def increment_leave_balance(db: Session, user_id: int, leave_type: str, days: float) -> None:
     """Increment leave balance with error handling"""
     try:
@@ -724,7 +719,6 @@ def increment_leave_balance(db: Session, user_id: int, leave_type: str, days: fl
     except SQLAlchemyError as e:
         logger.error(f"Database error incrementing leave balance: {e}")
         db.rollback()
-
 
 def soft_delete_leave(db: Session, user_id: int, leave_id: int) -> Dict[str, str]:
     """Soft delete leave with comprehensive error handling"""
@@ -761,8 +755,6 @@ def soft_delete_leave(db: Session, user_id: int, leave_id: int) -> Dict[str, str
         db.rollback()
         return {"message": "An unexpected error occurred", "status": "error"}
 
-
-# Keeping the remaining functions with similar improvements...
 def calculate_weekly_shrinkage_with_carry_forward(db: Session, manager_id: int, year: int = None, month: int = None):
     """Calculate weekly shrinkage with carry forward - optimized version"""
     try:
@@ -912,26 +904,37 @@ def calculate_weekly_shrinkage_with_carry_forward(db: Session, manager_id: int, 
             "note": f"Unexpected error: {str(e)}"
         }
 
-
-
-
+# FIXED: Single definition of get_next_30_day_shrinkage for associates
 def get_next_30_day_shrinkage(db: Session, user_id: int) -> List[Dict[str, Any]]:
     """Get next 30 days shrinkage and availability data with error handling and optimization"""
     try:
+        logger.info(f"Getting 30-day shrinkage for user_id: {user_id}")
+        
         user = db.get(User, user_id)
-        if not user or not user.team_id:
-            logger.warning(f"User {user_id} not found or not assigned to team")
+        if not user:
+            logger.warning(f"User {user_id} not found")
+            return []
+            
+        logger.info(f"User found: {user.username}, role: {user.role}, team_id: {user.team_id}")
+
+        # For associates, use their team_id
+        if not user.team_id:
+            logger.warning(f"User {user_id} not assigned to any team")
             return []
 
         team_id = user.team_id
         today = datetime.now().date()
         total_team_members = db.query(User).filter_by(team_id=team_id, role='associate').count()
+        
         if total_team_members == 0:
             logger.warning(f"No team members found for team {team_id}")
             return []
 
-        # Get all approved leaves for the next 30 days in one query
+        logger.info(f"Total team members: {total_team_members}")
+
         end_date = today + timedelta(days=30)
+        
+        # Get all approved leaves for the next 30 days
         approved_leaves = db.query(LeaveRequest).join(User).filter(
             User.team_id == team_id,
             User.role == 'associate',
@@ -940,167 +943,31 @@ def get_next_30_day_shrinkage(db: Session, user_id: int) -> List[Dict[str, Any]]
             LeaveRequest.end_date >= today
         ).all()
 
-        results = []
-        for i in range(30):
-            target_date = today + timedelta(days=i)
-            if target_date.weekday() >= 5:  # Skip weekends
-                continue
-
-            # Optional leave day logic
-            if is_optional_leave_day(db, target_date):
-                results.append({
-                    "date": target_date.isoformat(),
-                    "shrinkage": 0.0,
-                    "availability": 100.0,
-                    "status": "Safe",
-                    "on_leave": [],
-                })
-                continue
-
-            leave_count = 0.0
-            on_leave_users = []
-
-            for leave in approved_leaves:
-                if leave.start_date <= target_date <= leave.end_date:
-                    if leave.is_half_day:
-                        leave_count += 0.5
-                    else:
-                        leave_count += 1.0
-
-                    on_leave_users.append({
-                        "username": leave.user.username,
-                        "leave_type": leave.leave_type
-                    })
-
-            shrinkage = round((leave_count / total_team_members) * 100, 2)
-            availability = round(100 - shrinkage, 2)
-
-            results.append({
-                "date": target_date.isoformat(),
-                "shrinkage": shrinkage,
-                "availability": availability,
-                "status": (
-                    "Safe" if shrinkage < SAFE_SHRINKAGE_THRESHOLD
-                    else "Tight" if shrinkage <= SHRINKAGE_THRESHOLD
-                    else "Overbooked"
-                ),
-                "on_leave": on_leave_users
-            })
-
-        return results
-
-    except SQLAlchemyError as e:
-        logger.error(f"Database error in get_next_30_day_shrinkage: {e}")
-        return []
-    except Exception as e:
-        logger.info(f"Shrinkage for team {team_id} on {target_date}: planned={planned_shrinkage}, sick={sick_shrinkage}, total={total_shrinkage}")
-        logger.error(f"Unexpected error in get_next_30_day_shrinkage: {e}")
-        return []
-
-
-# def get_manager_next_30_day_shrinkage(db: Session, manager_id: int) -> List[Dict[str, Any]]:
-#     manager = db.get(User, manager_id)
-#     if not manager or manager.role != 'manager':
-#         logger.warning(f"Manager {manager_id} not found or not a manager")
-#         return []
-
-#     # Get all associates reporting to this manager
-#     associates = db.query(User).filter_by(reports_to_id=manager_id, role='associate').all()
-#     if not associates:
-#         logger.warning(f"No associates found for manager {manager_id}")
-#         return []
-
-#     associate_ids = [a.id for a in associates]
-#     today = datetime.now().date()
-#     end_date = today + timedelta(days=30)
-
-#     # Get all approved leaves for these associates in the next 30 days
-#     approved_leaves = db.query(LeaveRequest).filter(
-#         LeaveRequest.user_id.in_(associate_ids),
-#         LeaveRequest.status == "Approved",
-#         LeaveRequest.start_date <= end_date,
-#         LeaveRequest.end_date >= today
-#     ).all()
-
-#     results = []
-#     total_team_members = len(associates)
-#     for i in range(30):
-#         target_date = today + timedelta(days=i)
-#         if target_date.weekday() >= 5:
-#             continue
-
-#         leave_count = 0.0
-#         on_leave_users = []
-#         for leave in approved_leaves:
-#             if leave.start_date <= target_date <= leave.end_date:
-#                 leave_count += 0.5 if leave.is_half_day else 1.0
-#                 on_leave_users.append({
-#                     "username": leave.user.username,
-#                     "leave_type": leave.leave_type
-#                 })
-
-#         shrinkage = round((leave_count / total_team_members) * 100, 2) if total_team_members else 0.0
-#         availability = round(100 - shrinkage, 2)
-
-#         results.append({
-#             "date": target_date.isoformat(),
-#             "shrinkage": shrinkage,
-#             "availability": availability,
-#             "status": (
-#                 "Safe" if shrinkage < SAFE_SHRINKAGE_THRESHOLD
-#                 else "Tight" if shrinkage <= SHRINKAGE_THRESHOLD
-#                 else "Overbooked"
-#             ),
-#             "on_leave": on_leave_users
-#         })
-
-#     return results
-
-# Additional utility functions for comprehensive leave management
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-def get_next_30_day_shrinkage(db: Session, user_id: int) -> List[Dict[str, Any]]:
-    """Get next 30 days shrinkage and availability data with error handling and optimization"""
-    try:
-        user = db.get(User, user_id)
-        if not user or not user.team_id:
-            logger.warning(f"User {user_id} not found or not assigned to team")
-            return []
-
-        team_id = user.team_id
-        today = datetime.now().date()
-        total_team_members = db.query(User).filter_by(team_id=team_id, role='associate').count()
-        if total_team_members == 0:
-            logger.warning(f"No team members found for team {team_id}")
-            return []
-
-        # Get all approved leaves for the next 30 days in one query
-        end_date = today + timedelta(days=30)
-        approved_leaves = db.query(LeaveRequest).join(User).filter(
-            User.team_id == team_id,
-            User.role == 'associate',
-            LeaveRequest.status == "Approved",
-            LeaveRequest.start_date <= end_date,
-            LeaveRequest.end_date >= today
-        ).all()
+        logger.info(f"Found {len(approved_leaves)} approved leaves")
 
         results = []
         for i in range(30):
             target_date = today + timedelta(days=i)
             
-            # Skip weekends
-            if target_date.weekday() >= 5:  
-                continue
-
+            # Include ALL days (weekends and weekdays) - let frontend filter
+            is_weekend = target_date.weekday() >= 5
+            
             # Optional leave day logic
-            if is_optional_leave_day(db, target_date):
+            is_optional_day = is_optional_leave_day(db, target_date)
+            
+            if is_optional_day:
                 results.append({
                     "date": target_date.isoformat(),
+                    "day_name": target_date.strftime("%A"),
                     "shrinkage": 0.0,
                     "availability": 100.0,
                     "status": "Safe",
                     "on_leave": [],
                     "available_count": total_team_members,
-                    "total_team_members": total_team_members
+                    "total_team_members": total_team_members,
+                    "leave_count": 0.0,
+                    "is_weekend": is_weekend,
+                    "is_optional_day": True
                 })
                 continue
 
@@ -1132,7 +999,7 @@ def get_next_30_day_shrinkage(db: Session, user_id: int) -> List[Dict[str, Any]]
                         })
 
             # Calculate metrics
-            shrinkage = round((leave_count / total_team_members) * 100, 2)
+            shrinkage = round((leave_count / total_team_members) * 100, 2) if total_team_members > 0 else 0.0
             availability = round(100 - shrinkage, 2)
             available_count = total_team_members - int(leave_count)
 
@@ -1153,9 +1020,12 @@ def get_next_30_day_shrinkage(db: Session, user_id: int) -> List[Dict[str, Any]]
                 "on_leave": on_leave_users,
                 "available_count": available_count,
                 "total_team_members": total_team_members,
-                "leave_count": leave_count
+                "leave_count": leave_count,
+                "is_weekend": is_weekend,
+                "is_optional_day": False
             })
 
+        logger.info(f"Returning {len(results)} days of data")
         return results
 
     except SQLAlchemyError as e:
@@ -1165,10 +1035,12 @@ def get_next_30_day_shrinkage(db: Session, user_id: int) -> List[Dict[str, Any]]
         logger.error(f"Unexpected error in get_next_30_day_shrinkage: {e}")
         return []
 
-
+# FIXED: Single definition of get_manager_next_30_day_shrinkage for managers
 def get_manager_next_30_day_shrinkage(db: Session, manager_id: int) -> List[Dict[str, Any]]:
     """Get manager's team shrinkage for next 30 days with enhanced data"""
     try:
+        logger.info(f"Getting manager 30-day shrinkage for manager_id: {manager_id}")
+        
         manager = db.get(User, manager_id)
         if not manager or manager.role != 'manager':
             logger.warning(f"Manager {manager_id} not found or not a manager")
@@ -1181,6 +1053,8 @@ def get_manager_next_30_day_shrinkage(db: Session, manager_id: int) -> List[Dict
             return []
 
         associate_ids = [a.id for a in associates]
+        logger.info(f"Manager {manager.username} has {len(associates)} associates")
+
         today = datetime.now().date()
         end_date = today + timedelta(days=30)
 
@@ -1192,15 +1066,17 @@ def get_manager_next_30_day_shrinkage(db: Session, manager_id: int) -> List[Dict
             LeaveRequest.end_date >= today
         ).all()
 
+        logger.info(f"Found {len(approved_leaves)} approved leaves for manager's team")
+
         results = []
         total_team_members = len(associates)
         
         for i in range(30):
             target_date = today + timedelta(days=i)
             
-            # Skip weekends
-            if target_date.weekday() >= 5:
-                continue
+            # Include ALL days (weekends and weekdays)
+            is_weekend = target_date.weekday() >= 5
+            is_optional_day = is_optional_leave_day(db, target_date)
 
             leave_count = 0.0
             on_leave_users = []
@@ -1251,9 +1127,12 @@ def get_manager_next_30_day_shrinkage(db: Session, manager_id: int) -> List[Dict
                 "on_leave": on_leave_users,
                 "available_count": available_count,
                 "total_team_members": total_team_members,
-                "leave_count": leave_count
+                "leave_count": leave_count,
+                "is_weekend": is_weekend,
+                "is_optional_day": is_optional_day
             })
 
+        logger.info(f"Returning {len(results)} days of data for manager")
         return results
 
     except SQLAlchemyError as e:
@@ -1262,7 +1141,6 @@ def get_manager_next_30_day_shrinkage(db: Session, manager_id: int) -> List[Dict
     except Exception as e:
         logger.error(f"Unexpected error in get_manager_next_30_day_shrinkage: {e}")
         return []
-
 
 def get_team_availability_summary(db: Session, team_id: int, days: int = 30) -> Dict[str, Any]:
     """Get a comprehensive availability summary for a team"""
@@ -1336,7 +1214,6 @@ def get_team_availability_summary(db: Session, team_id: int, days: int = 30) -> 
     except Exception as e:
         logger.error(f"Error in get_team_availability_summary: {e}")
         return {"error": str(e)}
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 def get_user_leave_history(db: Session, user_id: int, year: int = None) -> List[Dict[str, Any]]:
     """Get user's leave history with error handling"""
@@ -1377,7 +1254,6 @@ def get_user_leave_history(db: Session, user_id: int, year: int = None) -> List[
         logger.error(f"Unexpected error in get_user_leave_history: {e}")
         return []
 
-
 def get_team_leave_calendar(db: Session, team_id: int, start_date: date, end_date: date) -> Dict[str, Any]:
     """Get team leave calendar for a date range"""
     try:
@@ -1414,8 +1290,8 @@ def get_team_leave_calendar(db: Session, team_id: int, start_date: date, end_dat
                     "date": current_date.isoformat(),
                     "shrinkage": shrinkage,
                     "status": (
-                        "Safe" if shrinkage < SAFE_SHRINKAGE_THRESHOLD
-                        else "Tight" if shrinkage <= SHRINKAGE_THRESHOLD
+                        "Safe" if shrinkage['total_shrinkage'] < SAFE_SHRINKAGE_THRESHOLD
+                        else "Tight" if shrinkage['total_shrinkage'] <= SHRINKAGE_THRESHOLD
                         else "Overbooked"
                     ),
                     "leaves": day_leaves
@@ -1431,7 +1307,6 @@ def get_team_leave_calendar(db: Session, team_id: int, start_date: date, end_dat
     except Exception as e:
         logger.error(f"Error in get_team_leave_calendar: {e}")
         return {"calendar": [], "team_size": 0, "error": str(e)}
-
 
 def get_leave_analytics(db: Session, team_id: int, year: int = None) -> Dict[str, Any]:
     """Get comprehensive leave analytics for a team"""
@@ -1540,71 +1415,73 @@ def validate_leave_request_modification(db: Session, leave_id: int, user_id: int
         logger.error(f"Error validating leave modification: {e}")
         return {"valid": False, "message": "Error validating leave request"}
 
+def get_user_monthly_leave_summary(db: Session, user_id: int, month: str = None, year: int = None) -> Dict[str, Any]:
+    """Get user's monthly leave summary with error handling"""
+    try:
+        from calendar import month_name
+        
+        user = db.query(User).filter_by(id=user_id).first()
+        if not user:
+            return {}
 
+        if not year:
+            year = datetime.now().year
 
-from datetime import datetime, date, timedelta
-from calendar import month_name
-from app.models import LeaveRequest, User
+        # Determine month number if provided
+        month_num = None
+        if month and month != "All":
+            try:
+                month_num = list(month_name).index(month)
+            except ValueError:
+                month_num = None
 
-def get_user_monthly_leave_summary(db, user_id, month=None, year=None):
-    user = db.query(User).filter_by(id=user_id).first()
-    if not user:
-        return {}
-
-    if not year:
-        year = datetime.now().year
-
-    # Determine month number if provided
-    month_num = None
-    if month and month != "All":
-        try:
-            month_num = list(month_name).index(month)
-        except ValueError:
-            month_num = None
-
-    # Build query for leaves
-    query = db.query(LeaveRequest).filter(
-        LeaveRequest.user_id == user_id,
-        LeaveRequest.status == "Approved",
-        LeaveRequest.start_date >= date(year, 1, 1),
-        LeaveRequest.end_date <= date(year, 12, 31)
-    )
-    if month_num:
-        # Get the first and last day of the month
-        start = date(year, month_num, 1)
-        if month_num == 12:
-            end = date(year + 1, 1, 1) - timedelta(days=1)
-        else:
-            end = date(year, month_num + 1, 1) - timedelta(days=1)
-        query = query.filter(
-            LeaveRequest.start_date <= end,
-            LeaveRequest.end_date >= start
+        # Build query for leaves
+        query = db.query(LeaveRequest).filter(
+            LeaveRequest.user_id == user_id,
+            LeaveRequest.status == "Approved",
+            LeaveRequest.start_date >= date(year, 1, 1),
+            LeaveRequest.end_date <= date(year, 12, 31)
         )
+        
+        if month_num:
+            # Get the first and last day of the month
+            start = date(year, month_num, 1)
+            if month_num == 12:
+                end = date(year + 1, 1, 1) - timedelta(days=1)
+            else:
+                end = date(year, month_num + 1, 1) - timedelta(days=1)
+            query = query.filter(
+                LeaveRequest.start_date <= end,
+                LeaveRequest.end_date >= start
+            )
 
-    leaves = query.all()
-    monthly_summary = {}
-    leave_dates = []
-    frequent_days = {}
+        leaves = query.all()
+        monthly_summary = {}
+        leave_dates = []
+        frequent_days = {}
 
-    for leave in leaves:
-        leave_type = leave.leave_type.upper()
-        # Count number of requests, not days
-        monthly_summary[leave_type] = monthly_summary.get(leave_type, 0) + 1
+        for leave in leaves:
+            leave_type = leave.leave_type.upper()
+            # Count number of requests, not days
+            monthly_summary[leave_type] = monthly_summary.get(leave_type, 0) + 1
 
-        # Collect leave dates and frequent days
-        current = leave.start_date
-        while current <= leave.end_date:
-            leave_dates.append(current.isoformat())
-            weekday = current.strftime("%A")
-            frequent_days[weekday] = frequent_days.get(weekday, 0) + 1
-            current += timedelta(days=1)
+            # Collect leave dates and frequent days
+            current = leave.start_date
+            while current <= leave.end_date:
+                leave_dates.append(current.isoformat())
+                weekday = current.strftime("%A")
+                frequent_days[weekday] = frequent_days.get(weekday, 0) + 1
+                current += timedelta(days=1)
 
-    return {
-        "username": user.username,
-        "monthly_summary": monthly_summary,
-        "frequent_days": frequent_days,
-        "leave_dates": leave_dates
-    }
+        return {
+            "username": user.username,
+            "monthly_summary": monthly_summary,
+            "frequent_days": frequent_days,
+            "leave_dates": leave_dates
+        }
+    except Exception as e:
+        logger.error(f"Error in get_user_monthly_leave_summary: {e}")
+        return {}
 
 def get_pending_approvals(db: Session, manager_id: int) -> List[Dict[str, Any]]:
     """Get all pending leave requests for a manager's approval"""
@@ -1635,6 +1512,7 @@ def get_pending_approvals(db: Session, manager_id: int) -> List[Dict[str, Any]]:
             approvals.append({
                 "leave_id": leave.id,
                 "username": leave.user.username,
+                "associate": getattr(leave.user, "full_name", leave.user.username),
                 "leave_type": leave.leave_type,
                 "start_date": leave.start_date.isoformat(),
                 "end_date": leave.end_date.isoformat(),
@@ -1650,7 +1528,6 @@ def get_pending_approvals(db: Session, manager_id: int) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Error getting pending approvals: {e}")
         return []
-
 
 def approve_reject_leave(db: Session, leave_id: int, manager_id: int, action: str, 
                         comments: str = "") -> Dict[str, Any]:
@@ -1723,7 +1600,6 @@ def approve_reject_leave(db: Session, leave_id: int, manager_id: int, action: st
         db.rollback()
         return {"message": "An unexpected error occurred", "status": "error"}
 
-
 def get_leave_balance_summary(db: Session, user_id: int) -> Dict[str, Any]:
     """Get comprehensive leave balance summary for a user"""
     try:
@@ -1761,7 +1637,7 @@ def get_leave_balance_summary(db: Session, user_id: int) -> Dict[str, Any]:
             "username": user.username,
             "available_balances": balance_dict,
             "used_this_year": used_by_type,
-            "leave_type_summary": used_by_type,  # <-- Add this line for frontend compatibility
+            "leave_type_summary": used_by_type,  # For frontend compatibility
             "current_month_leave_count": current_month_count,
             "monthly_limit": MONTHLY_LEAVE_LIMIT,
             "remaining_monthly_quota": max(0, MONTHLY_LEAVE_LIMIT - current_month_count)

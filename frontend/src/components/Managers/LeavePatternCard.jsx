@@ -219,42 +219,83 @@ const LeavePatternCard = ({ user, refreshKey, colorTheme = 'vibrant', theme }) =
               </div>
             </div>
 
-            {/* Leave statistics */}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-red-200 shadow-sm">
-                  <div className="flex items-center space-x-2">
-                    <div className="w-3 h-3 bg-red-500 rounded-full"></div>
-                    <span className="text-sm font-medium text-gray-700">Casual Leave</span>
-                  </div>
-                  <span className="font-bold text-red-600">{summary.monthly_summary?.CL || 0}</span>
+            {/* Leave statistics - Updated to include all three main leave types */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* Casual Leave */}
+              <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-red-200 shadow-sm">
+                <div className="flex items-center space-x-2">
+                  <div className="w-3 h-3 bg-red-500 rounded-full"></div>
+                  <span className="text-sm font-medium text-gray-700">Casual Leave</span>
                 </div>
-                
-                <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-green-200 shadow-sm">
-                  <div className="flex items-center space-x-2">
-                    <div className="w-3 h-3 bg-green-500 rounded-full"></div>
-                    <span className="text-sm font-medium text-gray-700">Annual Leave</span>
-                  </div>
-                  <span className="font-bold text-green-600">{summary.monthly_summary?.AL || 0}</span>
+                <span className="font-bold text-red-600">{summary.monthly_summary?.CL || 0}</span>
+              </div>
+              
+              {/* Annual Leave */}
+              <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-green-200 shadow-sm">
+                <div className="flex items-center space-x-2">
+                  <div className="w-3 h-3 bg-green-500 rounded-full"></div>
+                  <span className="text-sm font-medium text-gray-700">Annual Leave</span>
                 </div>
+                <span className="font-bold text-green-600">{summary.monthly_summary?.AL || 0}</span>
               </div>
 
-              <div className="space-y-2">
-                {/* Frequent days */}
-                <div className="p-3 bg-white rounded-lg border border-gray-200 shadow-sm">
-                  <div className="flex items-center space-x-2 mb-2">
-                    <svg className="h-4 w-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3a2 2 0 012-2h4a2 2 0 012 2v4m-6 4v10m6-10v10m6-2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    <span className="text-sm font-medium text-gray-700">Frequent Days</span>
-                  </div>
-                  <div className="text-xs text-gray-600">
-                    {summary.frequent_days && Object.keys(summary.frequent_days).length > 0 
-                      ? Object.keys(summary.frequent_days).join(', ')
-                      : 'No pattern detected'
-                    }
-                  </div>
+              {/* Sick Leave - NEW */}
+              <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-orange-200 shadow-sm">
+                <div className="flex items-center space-x-2">
+                  <div className="w-3 h-3 bg-orange-500 rounded-full"></div>
+                  <span className="text-sm font-medium text-gray-700">Sick Leave</span>
                 </div>
+                <span className="font-bold text-orange-600">{summary.monthly_summary?.SL || 0}</span>
+              </div>
+            </div>
+
+            {/* Additional leave types (if any) */}
+            {summary.monthly_summary && Object.keys(summary.monthly_summary).some(key => !['CL', 'AL', 'SL'].includes(key)) && (
+              <div className="grid grid-cols-2 gap-4">
+                {Object.entries(summary.monthly_summary)
+                  .filter(([type]) => !['CL', 'AL', 'SL'].includes(type))
+                  .map(([type, count]) => (
+                    <div key={type} className="flex items-center justify-between p-3 bg-white rounded-lg border border-gray-200 shadow-sm">
+                      <div className="flex items-center space-x-2">
+                        <div className={`w-3 h-3 rounded-full ${
+                          type === 'ML' ? 'bg-pink-500' : 
+                          type === 'PL' ? 'bg-purple-500' : 
+                          type === 'Emergency' ? 'bg-yellow-500' :
+                          'bg-gray-400'
+                        }`}></div>
+                        <span className="text-sm font-medium text-gray-700">
+                          {type === 'ML' ? 'Maternity Leave' :
+                           type === 'PL' ? 'Paternity Leave' :
+                           type === 'Emergency' ? 'Emergency Leave' :
+                           type}
+                        </span>
+                      </div>
+                      <span className={`font-bold ${
+                        type === 'ML' ? 'text-pink-600' : 
+                        type === 'PL' ? 'text-purple-600' : 
+                        type === 'Emergency' ? 'text-yellow-600' :
+                        'text-gray-600'
+                      }`}>
+                        {count || 0}
+                      </span>
+                    </div>
+                  ))}
+              </div>
+            )}
+
+            {/* Frequent days analysis */}
+            <div className="p-3 bg-white rounded-lg border border-gray-200 shadow-sm">
+              <div className="flex items-center space-x-2 mb-2">
+                <svg className="h-4 w-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3a2 2 0 012-2h4a2 2 0 012 2v4m-6 4v10m6-10v10m6-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="text-sm font-medium text-gray-700">Frequent Days</span>
+              </div>
+              <div className="text-xs text-gray-600">
+                {summary.frequent_days && Object.keys(summary.frequent_days).length > 0 
+                  ? Object.keys(summary.frequent_days).join(', ')
+                  : 'No pattern detected'
+                }
               </div>
             </div>
 
@@ -281,6 +322,19 @@ const LeavePatternCard = ({ user, refreshKey, colorTheme = 'vibrant', theme }) =
                 </div>
               </div>
             )}
+
+            {/* Leave summary totals */}
+            <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-blue-200 shadow-sm">
+              <div className="flex items-center space-x-2">
+                <svg className="h-4 w-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                </svg>
+                <span className="text-sm font-medium text-blue-700">Total Leave Days</span>
+              </div>
+              <span className="font-bold text-blue-600">
+                {Object.values(summary.monthly_summary || {}).reduce((sum, count) => sum + (count || 0), 0)}
+              </span>
+            </div>
           </div>
         ) : (
           <EmptyState />

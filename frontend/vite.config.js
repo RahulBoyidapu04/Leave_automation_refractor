@@ -7,14 +7,14 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/api/v1/leave': 'http://localhost:8000', // <-- Add this line
-      '/me': 'http://localhost:8000',
-      '/apply-leave': 'http://localhost:8000',
-      '/availability': 'http://localhost:8000',
-      '/manager': 'http://localhost:8000',
-      '/leave': 'http://localhost:8000',
-      '/notifications': 'http://localhost:8000',
-      '/auth': 'http://localhost:8000'
+      '/api/v1/leave': 'http://localhost:8001', // <-- Add this line
+      '/me': 'http://localhost:8001',
+      '/apply-leave': 'http://localhost:8001',
+      '/availability': 'http://localhost:8001',
+      '/manager': 'http://localhost:8001',
+      '/leave': 'http://localhost:8001',
+      '/notifications': 'http://localhost:8001',
+      '/auth': 'http://localhost:8001'
     }
   },
   build: {
